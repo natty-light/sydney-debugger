@@ -1,4 +1,3 @@
-#include <cstdio>
 #include <cstring>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
@@ -10,6 +9,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <unordered_set>
 #include <vector>
 
 using namespace ftxui;
@@ -22,7 +22,7 @@ private:
   int _sock;
 
 public:
-  Conn(std::string &path) {
+  Conn(const std::string &path) {
     _sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (_sock == -1) {
       return;
@@ -37,7 +37,7 @@ public:
     }
   }
 
-  int sendCmd(std::string &msg) {
+  int sendCmd(const std::string &msg) {
     std::string line = msg + "\n";
     return write(_sock, line.c_str(), line.size());
   }
@@ -74,6 +74,8 @@ struct DebugState {
   int line = 0;
   std::string reason;
   std::vector<std::string> source;
+  int cursor = 1;
+  std::unordered_set<int> bps;
 };
 
 std::vector<std::string> split_lines(const std::string &content) {
@@ -96,8 +98,7 @@ int main(int argc, char *argv[]) {
   Conn conn(path);
 
   std::mutex mtx;
-  std::string status = "waiting...";
-  struct DebugState state;
+  DebugState state;
 
   auto screen = ScreenInteractive::Fullscreen();
 
@@ -137,12 +138,19 @@ int main(int argc, char *argv[]) {
     Elements rows;
     for (int i = 0; i < (int)state.source.size(); i++) {
       int lineno = i + 1;
+      bool has_bp = state.bps.contains(lineno);
+      auto bp = text(has_bp ? "● " : "  ") | color(Color::Red);
+
       auto num = text(std::to_string(lineno)) | size(WIDTH, EQUAL, 4) |
                  color(Color::GrayDark);
       auto code = text(state.source[i]);
-      auto row = hbox({num, text(" "), code});
+      auto row = hbox({bp, num, text(" "), code});
       if (lineno == state.line) {
         row = row | inverted;
+      }
+
+      if (lineno == state.cursor) {
+        row |= underlined;
       }
       rows.push_back(row);
     }
@@ -177,6 +185,40 @@ int main(int argc, char *argv[]) {
 
     if (event == Event::Character('q')) {
       screen.Exit();
+      return true;
+    }
+
+    if (event == Event::ArrowDown) {
+      std::lock_guard<std::mutex> lock(mtx);
+      if (state.cursor < (int)state.source.size()) {
+        state.cursor++;
+      }
+      return true;
+    }
+
+    if (event == Event::ArrowUp) {
+      std::lock_guard<std::mutex> lock(mtx);
+      if (state.cursor > 1) {
+        state.cursor--;
+      }
+      return true;
+    }
+
+    if (event == Event::Character('b')) {
+      std::lock_guard<std::mutex> lock(mtx);
+      if (state.bps.contains(state.cursor)) {
+        state.bps.erase(state.cursor);
+        auto cmd = json({{"cmd", "remove_breakpoint"},
+                         {"file", state.file},
+                         {"line", state.cursor}}).dump();
+        conn.sendCmd(cmd);
+      } else {
+        state.bps.insert(state.cursor);
+        auto cmd = json({{"cmd", "set_breakpoint"},
+                         {"file", state.file},
+                         {"line", state.cursor}}).dump();
+        conn.sendCmd(cmd);
+      }
       return true;
     }
 
