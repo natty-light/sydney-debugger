@@ -76,6 +76,7 @@ struct DebugState {
   std::vector<std::string> source;
   int cursor = 1;
   std::unordered_set<int> bps;
+  char pending_key = 0;
 };
 
 std::vector<std::string> split_lines(const std::string &content) {
@@ -160,31 +161,67 @@ int main(int argc, char *argv[]) {
                            : state.file + ":" + std::to_string(state.line) +
                                  "  " + state.reason;
 
-    return vbox({
-               text("sydney-dbg") | bold,
-               separator(),
-               vbox(std::move(rows)) | frame | flex,
-               separator(),
-               text(status_text),
-           }) |
+    auto key_hint = state.pending_key ? std::string(1, state.pending_key) + "-"
+                                      : std::string("");
+
+    return vbox({text("sydney-dbg") | bold, separator(),
+                 vbox(std::move(rows)) | frame | flex, separator(),
+                 hbox({text(status_text), text("     "), text(key_hint)})}) |
            border | flex;
   });
 
   auto with_keys = CatchEvent(component, [&](Event event) {
-    if (event == Event::Character('n')) {
-      auto cmd = json({{"cmd", "step_line"}}).dump();
-      conn.sendCmd(cmd);
-      return true;
-    }
+    if (event.is_character()) {
+      std::lock_guard<std::mutex> lock(mtx);
+      char ch = event.character()[0];
 
-    if (event == Event::Character('c')) {
-      auto cmd = json({{"cmd", "continue"}}).dump();
-      conn.sendCmd(cmd);
-      return true;
-    }
+      // handle second key of a 2-char command
+      if (state.pending_key == 's') {
+        state.pending_key = 0;
+        if (ch == 'o') {
+          conn.sendCmd(json({{"cmd", "step_over"}}).dump());
+        } else if (ch == 'i') {
+          conn.sendCmd(json({{"cmd", "step_in"}}).dump());
+        } else if (ch == 'u') {
+          conn.sendCmd(json({{"cmd", "step_out"}}).dump());
+        }
+        return true;
+      }
 
-    if (event == Event::Character('q')) {
-      screen.Exit();
+      // start a 2-char command
+      if (ch == 's') {
+        state.pending_key = 's';
+        return true;
+      }
+
+      // single key commands
+      if (ch == 'n') {
+        conn.sendCmd(json({{"cmd", "step_line"}}).dump());
+        return true;
+      }
+      if (ch == 'c') {
+        conn.sendCmd(json({{"cmd", "continue"}}).dump());
+        return true;
+      }
+      if (ch == 'q') {
+        screen.Exit();
+        return true;
+      }
+      if (ch == 'b') {
+        if (state.bps.contains(state.cursor)) {
+          state.bps.erase(state.cursor);
+          conn.sendCmd(json({{"cmd", "remove_breakpoint"},
+                             {"file", state.file},
+                             {"line", state.cursor}}).dump());
+        } else {
+          state.bps.insert(state.cursor);
+          conn.sendCmd(json({{"cmd", "set_breakpoint"},
+                             {"file", state.file},
+                             {"line", state.cursor}}).dump());
+        }
+        return true;
+      }
+
       return true;
     }
 
@@ -200,24 +237,6 @@ int main(int argc, char *argv[]) {
       std::lock_guard<std::mutex> lock(mtx);
       if (state.cursor > 1) {
         state.cursor--;
-      }
-      return true;
-    }
-
-    if (event == Event::Character('b')) {
-      std::lock_guard<std::mutex> lock(mtx);
-      if (state.bps.contains(state.cursor)) {
-        state.bps.erase(state.cursor);
-        auto cmd = json({{"cmd", "remove_breakpoint"},
-                         {"file", state.file},
-                         {"line", state.cursor}}).dump();
-        conn.sendCmd(cmd);
-      } else {
-        state.bps.insert(state.cursor);
-        auto cmd = json({{"cmd", "set_breakpoint"},
-                         {"file", state.file},
-                         {"line", state.cursor}}).dump();
-        conn.sendCmd(cmd);
       }
       return true;
     }
