@@ -1,13 +1,16 @@
+#include <cstdio>
 #include <cstring>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include <string>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <vector>
 
 using namespace ftxui;
 using json = nlohmann::json;
@@ -70,7 +73,18 @@ struct DebugState {
   std::string file;
   int line = 0;
   std::string reason;
+  std::vector<std::string> source;
 };
+
+std::vector<std::string> split_lines(const std::string &content) {
+  std::vector<std::string> lines;
+  std::istringstream stream(content);
+  std::string line;
+  while (std::getline(stream, line)) {
+    lines.push_back(line);
+  }
+  return lines;
+}
 
 int main(int argc, char *argv[]) {
   if (argc < 2) {
@@ -87,37 +101,65 @@ int main(int argc, char *argv[]) {
 
   auto screen = ScreenInteractive::Fullscreen();
 
+  bool source_loaded = false;
+
   std::thread reader([&] {
     while (true) {
       auto line = conn.readEvent();
-      auto j = json::parse(line);
-      std::string event = j["event"];
-      struct DebugState newState;
-
-      if (event == "stopped") {
-        newState.file = j["file"];
-        newState.line = j["line"];
-        newState.reason = j["reason"];
-      }
       if (line.empty())
         break;
-      std::lock_guard<std::mutex> lock(mtx);
-      state = newState;
-      screen.PostEvent(Event::Custom);
+      auto j = json::parse(line);
+      std::string event = j["event"];
+
+      if (event == "stopped") {
+        if (!source_loaded) {
+          auto cmd = json({{"cmd", "get_source"}, {"file", j["file"]}}).dump();
+          conn.sendCmd(cmd);
+        }
+        std::lock_guard<std::mutex> lock(mtx);
+        state.event = event;
+        state.file = j["file"];
+        state.line = j["line"];
+        state.reason = j["reason"];
+        screen.PostEvent(Event::Custom);
+      } else if (event == "response" && j["type"] == "source") {
+        std::lock_guard<std::mutex> lock(mtx);
+        state.source = split_lines(j["content"]);
+        source_loaded = true;
+        screen.PostEvent(Event::Custom);
+      }
     }
   });
 
   auto component = Renderer([&] {
     std::lock_guard<std::mutex> lock(mtx);
-    return vbox({
-               text("sydney-dbg") | bold | center,
-               separator(),
-               text("stopped: " + state.file + ":" +
-                    std::to_string(state.line) + "    " + state.reason) |
-                   center,
 
+    Elements rows;
+    for (int i = 0; i < (int)state.source.size(); i++) {
+      int lineno = i + 1;
+      auto num = text(std::to_string(lineno)) | size(WIDTH, EQUAL, 4) |
+                 color(Color::GrayDark);
+      auto code = text(state.source[i]);
+      auto row = hbox({num, text(" "), code});
+      if (lineno == state.line) {
+        row = row | inverted;
+      }
+      rows.push_back(row);
+    }
+
+    auto status_text = state.file.empty()
+                           ? std::string("waiting...")
+                           : state.file + ":" + std::to_string(state.line) +
+                                 "  " + state.reason;
+
+    return vbox({
+               text("sydney-dbg") | bold,
+               separator(),
+               vbox(std::move(rows)) | frame | flex,
+               separator(),
+               text(status_text),
            }) |
-           border;
+           border | flex;
   });
 
   auto with_keys = CatchEvent(component, [&](Event event) {
