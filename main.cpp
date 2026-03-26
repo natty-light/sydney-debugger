@@ -72,9 +72,15 @@ struct Local {
     std::string value;
 };
 
+struct StackEntry {
+    std::string value;
+    std::string type;
+};
+
 enum DbgScreen {
     source = 0,
     locals = 1,
+    stack = 2,
 };
 
 struct DebugState {
@@ -87,6 +93,7 @@ struct DebugState {
     std::unordered_set<int> bps;
     char pending_key = 0;
     std::vector<Local> locals;
+    std::vector<StackEntry> stack;
     DbgScreen screen = DbgScreen::source; // 0 = source, 1 = locals
 };
 
@@ -96,6 +103,13 @@ Local parseLocal(json j) {
     local.type = j["Type"];
     local.value = j["Value"];
     return local;
+}
+
+StackEntry parseStack(json j) {
+    StackEntry stack;
+    stack.value = j["Value"];
+    stack.type = j["Type"];
+    return stack;
 }
 
 std::vector<std::string> split_lines(const std::string &content) {
@@ -108,13 +122,85 @@ std::vector<std::string> split_lines(const std::string &content) {
     return lines;
 }
 
-int main(int argc, char *argv[]) {
+Element renderSource(const DebugState &state) {
+    Elements rows;
+    for (int i = 0; i < static_cast<int>(state.source.size()); i++) {
+        int lineno = i + 1;
+        const bool has_bp = state.bps.contains(lineno);
+        auto bp = text(has_bp ? "● " : "  ") | color(Color::Red);
+
+        auto num = text(std::to_string(lineno)) | size(WIDTH, EQUAL, 4) |
+                   color(Color::GrayDark);
+        auto code = text(state.source[i]);
+        auto row = hbox({bp, num, text(" "), code});
+        if (lineno == state.line) {
+            row = row | inverted;
+        }
+
+        if (lineno == state.cursor) {
+            row |= underlined;
+        }
+        rows.push_back(row);
+    }
+
+    const auto status_text = state.file.empty()
+                           ? std::string("waiting...")
+                           : state.file + ":" + std::to_string(state.line) +
+                             "  " + state.reason;
+
+    const auto key_hint = state.pending_key
+                        ? std::string(1, state.pending_key) + "-"
+                        : std::string("");
+
+    return vbox({
+               text("sydney-dbg") | bold, separator(),
+               vbox(std::move(rows)) | frame | flex, separator(),
+               hbox({text(status_text), text("     "), text(key_hint)})
+           }) |
+           border | flex;
+}
+
+Element renderLocals(const DebugState &state) {
+    Elements locals;
+    for (int i = 0; i < static_cast<int>(state.locals.size()); i++) {
+        auto num = text(std::to_string(i)) | size(WIDTH, EQUAL, 4) |
+                   color(Color::GrayDark);
+        Element name = text(state.locals[i].name);
+        Element type = text(state.locals[i].type);
+        Element value = text(state.locals[i].value);
+        locals.push_back(hbox({name, type, value}));
+    }
+
+
+    return vbox(
+        hbox(text("sydney-dbg") | bold, separator(),  text("locals") | bold),
+        vbox(std::move(locals) | frame | flex, separator())
+    ) | border | flex;
+}
+
+Element renderStack(const DebugState &state) {
+    Elements stack;
+    for (int i = 0; i < static_cast<int>(state.stack.size()); i++) {
+        auto num = text(std::to_string(i)) | size(WIDTH, EQUAL, 4) |
+            color(Color::GrayDark);
+        Element type = text(state.stack[i].type);
+        Element value = text(state.stack[i].value);
+        stack.push_back(hbox({ type, value}));
+    }
+
+    return vbox(
+       hbox(text("sydney-dbg") | bold, separator(),  text("stack") | bold),
+       vbox(std::move(stack) | frame | flex, separator())
+   ) | border | flex;
+}
+
+int main(const int argc, char *argv[]) {
     if (argc < 2) {
         std::cerr << "usage sydney-dbg <socket-path>\n";
         return 1;
     }
 
-    std::string path(argv[1]);
+    const std::string path(argv[1]);
     Conn conn(path);
 
     std::mutex mtx;
@@ -156,6 +242,13 @@ int main(int argc, char *argv[]) {
                 std::lock_guard<std::mutex> lock(mtx);
                 state.locals = locals;
                 screen.PostEvent(Event::Custom);
+            } else if (event == "response" && j["type"] == "stack") {
+                std::vector<StackEntry> stack;
+                for (auto jj: j["data"]) {
+                    stack.push_back(parseStack(std::move(jj)));
+                }
+                state.stack = stack;
+                screen.PostEvent(Event::Custom);
             }
         }
     });
@@ -163,59 +256,15 @@ int main(int argc, char *argv[]) {
     const auto component = Renderer([&] {
         std::lock_guard lock(mtx);
 
-        if (state.screen == DbgScreen::source) {
-            Elements rows;
-            for (int i = 0; i < (int) state.source.size(); i++) {
-                int lineno = i + 1;
-                bool has_bp = state.bps.contains(lineno);
-                auto bp = text(has_bp ? "● " : "  ") | color(Color::Red);
-
-                auto num = text(std::to_string(lineno)) | size(WIDTH, EQUAL, 4) |
-                           color(Color::GrayDark);
-                auto code = text(state.source[i]);
-                auto row = hbox({bp, num, text(" "), code});
-                if (lineno == state.line) {
-                    row = row | inverted;
-                }
-
-                if (lineno == state.cursor) {
-                    row |= underlined;
-                }
-                rows.push_back(row);
-            }
-
-            const auto status_text = state.file.empty()
-                                   ? std::string("waiting...")
-                                   : state.file + ":" + std::to_string(state.line) +
-                                     "  " + state.reason;
-
-            const auto key_hint = state.pending_key
-                                ? std::string(1, state.pending_key) + "-"
-                                : std::string("");
-
-            return vbox({
-                       text("sydney-dbg") | bold, separator(),
-                       vbox(std::move(rows)) | frame | flex, separator(),
-                       hbox({text(status_text), text("     "), text(key_hint)})
-                   }) |
-                   border | flex;
+        if (state.screen == source) {
+            return renderSource(state);
         }
 
-        Elements locals;
-        for (int i = 0; i < static_cast<int>(state.locals.size()); i++) {
-               auto num = text(std::to_string(i)) | size(WIDTH, EQUAL, 4) |
-                          color(Color::GrayDark);
-                Element name = text(state.locals[i].name);
-                Element type = text(state.locals[i].type);
-                Element value = text(state.locals[i].value);
-                locals.push_back(hbox({name, type, value}));
-           }
+        if (state.screen == locals) {
+            return renderLocals(state);
+        }
 
-
-        return vbox(
-            hbox(text("sydney-dbg") | bold, separator(),  text("locals") | bold),
-            vbox(std::move(locals) | frame | flex, separator())
-        ) | border | flex;
+        return renderStack(state);
     });
 
     const auto with_keys = CatchEvent(component, [&](const Event &event) {
@@ -232,6 +281,10 @@ int main(int argc, char *argv[]) {
                     conn.sendCmd(json({{"cmd", "step_in"}}).dump());
                 } else if (ch == 'u') {
                     conn.sendCmd(json({{"cmd", "step_out"}}).dump());
+                } else if (ch == 't' && state.screen != stack) {
+                    conn.sendCmd(json({{"cmd", "get_stack"}}).dump());
+                    state.stack.clear();
+                    state.screen = stack;
                 }
                 return true;
             }
@@ -273,14 +326,14 @@ int main(int argc, char *argv[]) {
                 }
                 return true;
             }
-            if (ch == 'l') {
+            if (ch == 'l' && state.screen != locals) {
                 conn.sendCmd(json({{"cmd", "get_locals"}}).dump());
                 state.locals.clear();
                 state.screen = locals;
                 return true;
             }
 
-            if (ch == 'd') {
+            if (ch == 'd' && state.screen != source) {
                 state.locals.clear();
                 state.screen = source;
                 return true;
