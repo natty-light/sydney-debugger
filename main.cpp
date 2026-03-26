@@ -26,11 +26,10 @@ public:
         if (_sock == -1) {
             return;
         }
-        struct sockaddr_un addr;
-        memset(&addr, 0, sizeof(addr));
+        sockaddr_un addr = {};
         addr.sun_family = AF_UNIX;
         strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
-        int cn = connect(_sock, (struct sockaddr *) &addr, sizeof(addr));
+        int cn = connect(_sock, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr));
         if (cn == -1) {
             return;
         }
@@ -161,8 +160,8 @@ int main(int argc, char *argv[]) {
         }
     });
 
-    auto component = Renderer([&] {
-        std::lock_guard<std::mutex> lock(mtx);
+    const auto component = Renderer([&] {
+        std::lock_guard lock(mtx);
 
         if (state.screen == DbgScreen::source) {
             Elements rows;
@@ -185,12 +184,12 @@ int main(int argc, char *argv[]) {
                 rows.push_back(row);
             }
 
-            auto status_text = state.file.empty()
+            const auto status_text = state.file.empty()
                                    ? std::string("waiting...")
                                    : state.file + ":" + std::to_string(state.line) +
                                      "  " + state.reason;
 
-            auto key_hint = state.pending_key
+            const auto key_hint = state.pending_key
                                 ? std::string(1, state.pending_key) + "-"
                                 : std::string("");
 
@@ -203,7 +202,7 @@ int main(int argc, char *argv[]) {
         }
 
         Elements locals;
-        for (int i = 0; i < (int) state.locals.size(); i++) {
+        for (int i = 0; i < static_cast<int>(state.locals.size()); i++) {
                auto num = text(std::to_string(i)) | size(WIDTH, EQUAL, 4) |
                           color(Color::GrayDark);
                 Element name = text(state.locals[i].name);
@@ -219,10 +218,10 @@ int main(int argc, char *argv[]) {
         ) | border | flex;
     });
 
-    auto with_keys = CatchEvent(component, [&](Event event) {
+    const auto with_keys = CatchEvent(component, [&](const Event &event) {
         if (event.is_character()) {
-            std::lock_guard<std::mutex> lock(mtx);
-            char ch = event.character()[0];
+            std::lock_guard lock(mtx);
+            const char ch = event.character()[0];
 
             // handle second key of a 2-char command
             if (state.pending_key == 's') {
@@ -291,15 +290,15 @@ int main(int argc, char *argv[]) {
         }
 
         if (event == Event::ArrowDown) {
-            std::lock_guard<std::mutex> lock(mtx);
-            if (state.cursor < (int) state.source.size()) {
+            std::lock_guard lock(mtx);
+            if (state.cursor < static_cast<int>(state.source.size())) {
                 state.cursor++;
             }
             return true;
         }
 
         if (event == Event::ArrowUp) {
-            std::lock_guard<std::mutex> lock(mtx);
+            std::lock_guard lock(mtx);
             if (state.cursor > 1) {
                 state.cursor--;
             }
