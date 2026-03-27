@@ -134,7 +134,7 @@ Element renderSource(const DebugState &state) {
         auto code = text(state.source[i]);
         auto row = hbox({bp, num, text(" "), code});
         if (lineno == state.line) {
-            row = row | inverted;
+            row = row | inverted | focus;
         }
 
         if (lineno == state.cursor) {
