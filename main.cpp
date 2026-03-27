@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <ftxui/component/component.hpp>
@@ -83,6 +84,7 @@ enum DbgScreen {
   source = 0,
   locals = 1,
   stack = 2,
+  output = 3,
 };
 
 struct DebugState {
@@ -97,6 +99,8 @@ struct DebugState {
   std::vector<Local> locals;
   std::vector<StackEntry> stack;
   DbgScreen screen = DbgScreen::source; // 0 = source, 1 = locals
+  bool focus_cursor = false;
+  std::vector<std::string> output;
 };
 
 Local parseLocal(json j) {
@@ -136,11 +140,17 @@ Element renderSource(const DebugState &state) {
     auto code = text(state.source[i]);
     auto row = hbox({bp, num, text(" "), code});
     if (lineno == state.line) {
-      row = row | inverted | focus;
+      row = row | inverted;
+      if (!state.focus_cursor) {
+        row |= focus;
+      }
     }
 
     if (lineno == state.cursor) {
       row |= underlined;
+      if (state.focus_cursor) {
+        row |= focus;
+      }
     }
     rows.push_back(row);
   }
@@ -193,6 +203,19 @@ Element renderStack(const DebugState &state) {
          border | flex;
 }
 
+Element renderOutput(const DebugState &state) {
+  Elements lines;
+  for (auto line : state.output) {
+    auto txt = text(line) | color(Color::GrayDark);
+    lines.push_back(txt);
+  }
+
+  return vbox(hbox(text("sydney-dbg") | bold, separator(),
+                   text("outputs") | bold),
+              separator(), vbox(std::move(lines)) | frame | flex) |
+         border | flex;
+}
+
 int main(const int argc, char *argv[]) {
   if (argc < 2) {
     std::cerr << "usage sydney-dbg <program-path>\n";
@@ -200,16 +223,23 @@ int main(const int argc, char *argv[]) {
   }
 
   const std::string path(argv[1]);
+  int pipefd[2];
+  pipe(pipefd);
 
   pid_t pid = fork();
   if (pid == -1) {
     std::cerr << "unable to spawn child process\n";
     return 1;
   } else if (pid == 0) {
+    close(pipefd[0]);
+    dup2(pipefd[1], STDOUT_FILENO);
+    close(pipefd[1]);
     int res = execlp("sydney", "sydney", "debug", path.c_str());
     std::cerr << "failed to start sydney";
     return 1;
   }
+
+  close(pipefd[1]);
 
   std::string sock_path = "/tmp/sydney-debug-" + std::to_string(pid) + ".sock";
 
@@ -229,6 +259,24 @@ int main(const int argc, char *argv[]) {
 
   bool source_loaded = false;
 
+  std::thread interceptor([&] {
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+      std::string chunk(buf, n);
+      auto lines = split_lines(chunk);
+      std::lock_guard lock(mtx);
+      for (auto &l : lines) {
+        l.erase(std::remove(l.begin(), l.end(), '\r'), l.end());
+        if (!l.empty()) {
+          state.output.push_back(std::move(l));
+        }
+      }
+      screen.PostEvent(Event::Custom);
+    }
+    close(pipefd[0]);
+  });
+
   std::thread reader([&] {
     while (true) {
       auto line = conn.readEvent();
@@ -246,7 +294,9 @@ int main(const int argc, char *argv[]) {
         state.event = event;
         state.file = j["file"];
         state.line = j["line"];
+        state.cursor = state.line;
         state.reason = j["reason"];
+        state.focus_cursor = true;
         screen.PostEvent(Event::Custom);
       } else if (event == "response" && j["type"] == "source") {
         std::lock_guard<std::mutex> lock(mtx);
@@ -281,6 +331,10 @@ int main(const int argc, char *argv[]) {
 
     if (state.screen == locals) {
       return renderLocals(state);
+    }
+
+    if (state.screen == output) {
+      return renderOutput(state);
     }
 
     return renderStack(state);
@@ -353,6 +407,11 @@ int main(const int argc, char *argv[]) {
       if (ch == 'd' && state.screen != source) {
         state.locals.clear();
         state.screen = source;
+        return true;
+      }
+
+      if (ch == 'o' && state.screen != output) {
+        state.screen = output;
         return true;
       }
 
